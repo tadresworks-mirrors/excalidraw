@@ -1,7 +1,6 @@
 import {
   KEYS,
   arrayToMap,
-  isBindingFallthroughEnabled,
   tupleToCoors,
   invariant,
   isDevEnv,
@@ -427,7 +426,7 @@ export const getSuggestedBindingsForArrows = (
 export const maybeBindLinearElement = (
   linearElement: NonDeleted<ExcalidrawLinearElement>,
   appState: AppState,
-  pointerCoords: { x: number; y: number },
+  startOrEnd: "start" | "end",
   elementsMap: NonDeletedSceneElementsMap,
   elements: readonly NonDeletedExcalidrawElement[],
 ): void => {
@@ -441,7 +440,20 @@ export const maybeBindLinearElement = (
   }
 
   const hoveredElement = getHoveredElementForBinding(
-    pointerCoords,
+    tupleToCoors(
+      LinearElementEditor.getPointAtIndexGlobalCoordinates(
+        linearElement,
+        startOrEnd ? 0 : -1,
+        elementsMap,
+      ),
+    ),
+    tupleToCoors(
+      LinearElementEditor.getPointAtIndexGlobalCoordinates(
+        linearElement,
+        startOrEnd ? -1 : 0,
+        elementsMap,
+      ),
+    ),
     elements,
     elementsMap,
     appState.zoom,
@@ -568,6 +580,10 @@ export const getHoveredElementForBinding = (
     x: number;
     y: number;
   },
+  otherPointerCoords: {
+    x: number;
+    y: number;
+  },
   elements: readonly NonDeletedExcalidrawElement[],
   elementsMap: NonDeletedSceneElementsMap,
   zoom?: AppState["zoom"],
@@ -575,59 +591,89 @@ export const getHoveredElementForBinding = (
   considerAllElements?: boolean,
 ): NonDeleted<ExcalidrawBindableElement> | null => {
   if (considerAllElements) {
-    let cullRest = false;
-    const candidateElements = getAllElementsAtPositionForBinding(
-      elements,
-      (element) =>
-        isBindableElement(element, false) &&
-        bindingBorderTest(
-          element,
-          pointerCoords,
-          elementsMap,
-          zoom,
-          (fullShape ||
-            !isBindingFallthroughEnabled(
-              element as ExcalidrawBindableElement,
-            )) &&
-            // disable fullshape snapping for frame elements so we
-            // can bind to frame children
-            !isFrameLikeElement(element),
-        ),
-    ).filter((element) => {
-      if (cullRest) {
-        return false;
-      }
+    const otherCandidateElement =
+      getAllElementsAtPositionForBinding(
+        elements,
+        (element) =>
+          isBindableElement(element, false) &&
+          bindingBorderTest(
+            element,
+            otherPointerCoords,
+            elementsMap,
+            zoom,
+            fullShape ||
+              // disable fullshape snapping for frame elements so we
+              // can bind to frame children
+              !isFrameLikeElement(element),
+          ),
+      )
+        .filter(
+          (element): element is NonDeleted<ExcalidrawBindableElement> =>
+            element != null,
+        )
+        // Prefer the shape with the border being tested (if any)
+        .filter(
+          (element, _, arr) =>
+            arr.length <= 1 ||
+            bindingBorderTest(
+              element as NonDeleted<ExcalidrawBindableElement>,
+              otherPointerCoords,
+              elementsMap,
+              zoom,
+              false,
+            ),
+        )
+        // Prefer smaller bindables to be consisent with the check for the other
+        // point
+        .sort(
+          (a, b) =>
+            b.width ** 2 + b.height ** 2 - (a.width ** 2 + a.height ** 2),
+        )
+        .pop() ?? null;
 
-      if (!isBindingFallthroughEnabled(element as ExcalidrawBindableElement)) {
-        cullRest = true;
-      }
+    const candidateElement =
+      getAllElementsAtPositionForBinding(
+        elements,
+        (element) =>
+          isBindableElement(element, false) &&
+          bindingBorderTest(
+            element,
+            pointerCoords,
+            elementsMap,
+            zoom,
+            fullShape ||
+              // disable fullshape snapping for frame elements so we
+              // can bind to frame children
+              !isFrameLikeElement(element),
+          ),
+      )
+        .filter(
+          (element): element is NonDeleted<ExcalidrawBindableElement> =>
+            element != null,
+        ) // Prefer the shape with the border being tested (if any)
+        .filter(
+          (element, _, arr) =>
+            arr.length <= 1 ||
+            bindingBorderTest(
+              element as NonDeleted<ExcalidrawBindableElement>,
+              pointerCoords,
+              elementsMap,
+              zoom,
+              false,
+            ),
+        )
+        // Prefer smaller bindables
+        .sort(
+          (a, b) =>
+            b.width ** 2 + b.height ** 2 - (a.width ** 2 + a.height ** 2),
+        )
+        .pop() ?? null;
 
-      return true;
-    }) as NonDeleted<ExcalidrawBindableElement>[] | null;
-
-    // Return early if there are no candidates or just one candidate
-    if (!candidateElements || candidateElements.length === 0) {
+    if (otherCandidateElement === candidateElement) {
       return null;
     }
 
-    if (candidateElements.length === 1) {
-      return candidateElements[0] as NonDeleted<ExcalidrawBindableElement>;
-    }
-
-    // Prefer the shape with the border being tested (if any)
-    const borderTestElements = candidateElements.filter((element) =>
-      bindingBorderTest(element, pointerCoords, elementsMap, zoom, false),
-    );
-    if (borderTestElements.length === 1) {
-      return borderTestElements[0];
-    }
-
-    // Prefer smaller shapes
-    return candidateElements
-      .sort(
-        (a, b) => b.width ** 2 + b.height ** 2 - (a.width ** 2 + a.height ** 2),
-      )
-      .pop() as NonDeleted<ExcalidrawBindableElement>;
+    return candidateElement;
   }
 
   const hoveredElement = getElementAtPositionForBinding(
@@ -641,8 +687,7 @@ export const getHoveredElementForBinding = (
         zoom,
         // disable fullshape snapping for frame elements so we
         // can bind to frame children
-        (fullShape || !isBindingFallthroughEnabled(element)) &&
-          !isFrameLikeElement(element),
+        fullShape || !isFrameLikeElement(element),
       ),
   );
 
@@ -1179,34 +1224,39 @@ export const snapToMid = (
 
 export const getOutlineAvoidingPoint = (
   element: NonDeleted<ExcalidrawLinearElement>,
-  coords: GlobalPoint,
-  pointIndex: number,
+  startOrEnd: "start" | "end",
   scene: Scene,
   zoom: AppState["zoom"],
   fallback?: GlobalPoint,
 ): GlobalPoint => {
   const elementsMap = scene.getNonDeletedElementsMap();
+  const elements = scene.getNonDeletedElements();
+  const coords = LinearElementEditor.getPointAtIndexGlobalCoordinates(
+    element,
+    startOrEnd ? 0 : -1,
+    elementsMap,
+  );
   const hoveredElement = getHoveredElementForBinding(
-    { x: coords[0], y: coords[1] },
-    scene.getNonDeletedElements(),
+    tupleToCoors(coords),
+    tupleToCoors(
+      LinearElementEditor.getPointAtIndexGlobalCoordinates(
+        element,
+        startOrEnd ? -1 : 0,
+        elementsMap,
+      ),
+    ),
+    elements,
     elementsMap,
     zoom,
     true,
     isElbowArrow(element),
   );
 
-  if (hoveredElement) {
-    const newPoints = Array.from(element.points);
-    newPoints[pointIndex] = pointFrom<LocalPoint>(
-      coords[0] - element.x,
-      coords[1] - element.y,
-    );
+  const pointIndex = startOrEnd === "start" ? 0 : element.points.length - 1;
 
+  if (hoveredElement) {
     return bindPointToSnapToElementOutline(
-      {
-        ...element,
-        points: newPoints,
-      },
+      element,
       hoveredElement,
       pointIndex === 0 ? "start" : "end",
       elementsMap,

@@ -2919,14 +2919,8 @@ class App extends React.Component<AppProps, AppState> {
       maybeBindLinearElement(
         multiElement,
         this.state,
-        tupleToCoors(
-          LinearElementEditor.getPointAtIndexGlobalCoordinates(
-            multiElement,
-            -1,
-            nonDeletedElementsMap,
-          ),
-        ),
-        this.scene.getNonDeletedElementsMap(),
+        "end",
+        nonDeletedElementsMap,
         this.scene.getNonDeletedElements(),
       );
     }
@@ -5976,8 +5970,7 @@ class App extends React.Component<AppProps, AppState> {
               toLocalPoint(
                 getOutlineAvoidingPoint(
                   multiElement,
-                  pointFrom<GlobalPoint>(scenePointerX, scenePointerY),
-                  multiElement.points.length - 1,
+                  "end",
                   this.scene,
                   this.state.zoom,
                   pointFrom<GlobalPoint>(
@@ -8667,7 +8660,16 @@ class App extends React.Component<AppProps, AppState> {
                   ...points.slice(0, -1),
                   toLocalPoint(
                     getOutlineAvoidingPoint(
-                      newElement,
+                      {
+                        ...newElement,
+                        points: [
+                          ...points.slice(0, -1),
+                          pointFrom<LocalPoint>(
+                            pointerCoords.x - newElement.x,
+                            pointerCoords.y - newElement.y,
+                          ),
+                        ],
+                      },
                       pointFrom<GlobalPoint>(pointerCoords.x, pointerCoords.y),
                       newElement.points.length - 1,
                       this.scene,
@@ -9091,7 +9093,7 @@ class App extends React.Component<AppProps, AppState> {
             maybeBindLinearElement(
               newElement,
               this.state,
-              pointerCoords,
+              "end",
               this.scene.getNonDeletedElementsMap(),
               this.scene.getNonDeletedElements(),
             );
