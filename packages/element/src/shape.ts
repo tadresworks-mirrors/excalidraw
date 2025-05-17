@@ -1,12 +1,25 @@
 import { simplify } from "points-on-curve";
 
 import {
+  getClosedCurveShape,
+  getCurveShape,
+  getEllipseShape,
+  getFreedrawShape,
+  getPolygonShape,
+} from "@excalidraw/utils/shape";
+
+import {
   pointFrom,
   pointDistance,
   type LocalPoint,
   pointRotateRads,
 } from "@excalidraw/math";
-import { ROUGHNESS, isTransparent, assertNever } from "@excalidraw/common";
+import {
+  ROUGHNESS,
+  isTransparent,
+  assertNever,
+  COLOR_PALETTE,
+} from "@excalidraw/common";
 
 import { RoughGenerator } from "roughjs/bin/generator";
 
@@ -14,8 +27,17 @@ import type { GlobalPoint, Radians } from "@excalidraw/math";
 
 import type { Mutable } from "@excalidraw/common/utility-types";
 
-import type { EmbedsValidationStatus } from "@excalidraw/excalidraw/types";
-import type { ElementShapes } from "@excalidraw/excalidraw/scene/types";
+import type {
+  AppState,
+  EmbedsValidationStatus,
+} from "@excalidraw/excalidraw/types";
+
+import type {
+  ElementShape,
+  ElementShapes,
+} from "@excalidraw/excalidraw/scene/types";
+
+import type { GeometricShape } from "@excalidraw/utils/shape";
 
 import {
   isElbowArrow,
@@ -24,16 +46,19 @@ import {
   isIframeLikeElement,
   isLinearElement,
 } from "./typeChecks";
-import { getCornerRadius, isPathALoop } from "./shapes";
 import { headingForPointIsHorizontal } from "./heading";
 
 import { canChangeRoundness } from "./comparisons";
-import { generateFreeDrawShape } from "./renderElement";
+import { elementWithCanvasCache, generateFreeDrawShape } from "./renderElement";
 import {
   getArrowheadPoints,
   getDiamondPoints,
+  getElementAbsoluteCoords,
   getElementBounds,
 } from "./bounds";
+
+import { shouldTestInside } from "./collision";
+import { getCornerRadius, isPathALoop } from "./utils";
 
 import type {
   ExcalidrawElement,
@@ -42,6 +67,7 @@ import type {
   ExcalidrawLinearElement,
   Arrowhead,
   ExcalidrawFreeDrawElement,
+  ElementsMap,
 } from "./types";
 
 import type { Drawable, Options } from "roughjs/bin/core";
@@ -743,3 +769,134 @@ const generateElbowArrowShape = (
 
   return d.join(" ");
 };
+
+/**
+ * get the pure geometric shape of an excalidraw elementw
+ * which is then used for hit detection
+ */
+export const getElementShape = <Point extends GlobalPoint | LocalPoint>(
+  element: ExcalidrawElement,
+  elementsMap: ElementsMap,
+): GeometricShape<Point> => {
+  switch (element.type) {
+    case "rectangle":
+    case "diamond":
+    case "frame":
+    case "magicframe":
+    case "embeddable":
+    case "image":
+    case "iframe":
+    case "text":
+    case "selection":
+      return getPolygonShape(element);
+    case "arrow":
+    case "line": {
+      const roughShape =
+        ShapeCache.get(element)?.[0] ??
+        ShapeCache.generateElementShape(element, null)[0];
+      const [, , , , cx, cy] = getElementAbsoluteCoords(element, elementsMap);
+
+      return shouldTestInside(element)
+        ? getClosedCurveShape<Point>(
+            element,
+            roughShape,
+            pointFrom<Point>(element.x, element.y),
+            element.angle,
+            pointFrom(cx, cy),
+          )
+        : getCurveShape<Point>(
+            roughShape,
+            pointFrom<Point>(element.x, element.y),
+            element.angle,
+            pointFrom(cx, cy),
+          );
+    }
+
+    case "ellipse":
+      return getEllipseShape(element);
+
+    case "freedraw": {
+      const [, , , , cx, cy] = getElementAbsoluteCoords(element, elementsMap);
+      return getFreedrawShape(
+        element,
+        pointFrom(cx, cy),
+        shouldTestInside(element),
+      );
+    }
+  }
+};
+
+export class ShapeCache {
+  private static rg = new RoughGenerator();
+  private static cache = new WeakMap<ExcalidrawElement, ElementShape>();
+
+  /**
+   * Retrieves shape from cache if available. Use this only if shape
+   * is optional and you have a fallback in case it's not cached.
+   */
+  public static get = <T extends ExcalidrawElement>(element: T) => {
+    return ShapeCache.cache.get(
+      element,
+    ) as T["type"] extends keyof ElementShapes
+      ? ElementShapes[T["type"]] | undefined
+      : ElementShape | undefined;
+  };
+
+  public static set = <T extends ExcalidrawElement>(
+    element: T,
+    shape: T["type"] extends keyof ElementShapes
+      ? ElementShapes[T["type"]]
+      : Drawable,
+  ) => ShapeCache.cache.set(element, shape);
+
+  public static delete = (element: ExcalidrawElement) =>
+    ShapeCache.cache.delete(element);
+
+  public static destroy = () => {
+    ShapeCache.cache = new WeakMap();
+  };
+
+  /**
+   * Generates & caches shape for element if not already cached, otherwise
+   * returns cached shape.
+   */
+  public static generateElementShape = <
+    T extends Exclude<ExcalidrawElement, ExcalidrawSelectionElement>,
+  >(
+    element: T,
+    renderConfig: {
+      isExporting: boolean;
+      canvasBackgroundColor: AppState["viewBackgroundColor"];
+      embedsValidationStatus: EmbedsValidationStatus;
+    } | null,
+  ) => {
+    // when exporting, always regenerated to guarantee the latest shape
+    const cachedShape = renderConfig?.isExporting
+      ? undefined
+      : ShapeCache.get(element);
+
+    // `null` indicates no rc shape applicable for this element type,
+    // but it's considered a valid cache value (= do not regenerate)
+    if (cachedShape !== undefined) {
+      return cachedShape;
+    }
+
+    elementWithCanvasCache.delete(element);
+
+    const shape = _generateElementShape(
+      element,
+      ShapeCache.rg,
+      renderConfig || {
+        isExporting: false,
+        canvasBackgroundColor: COLOR_PALETTE.white,
+        embedsValidationStatus: null,
+      },
+    ) as T["type"] extends keyof ElementShapes
+      ? ElementShapes[T["type"]]
+      : Drawable | null;
+
+    ShapeCache.cache.set(element, shape);
+
+    return shape;
+  };
+}
